@@ -1,0 +1,6 @@
+# One namespace per bot. The ServiceAccount in rbac.yaml is namespaced, so the namespace is the outer bound of
+# what `kubectl` can reach even before the verbs are considered.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mcbot

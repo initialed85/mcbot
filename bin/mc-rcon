@@ -1,0 +1,163 @@
+#!/usr/bin/env python3
+"""Run one Minecraft console command, publicly, with the gate applied before a byte is sent.
+
+This is the tool mcbot's Pi agent uses to touch the game (`mc-rcon list`, `mc-rcon whitelist add mason_bee`).
+It exists so the rules live here rather than in the persona:
+
+  - whispers are refused in every turn. `msg`, `w`, `tell` and `tellraw <name>` are private chat, and mcbot's
+    answers are public by design - on a shared server a private answer is an edge nobody else asked for.
+    `tellraw @a` is fine: same formatting, said to everybody.
+  - in-game actions (give, tp, summon, gamemode, kick, ban, block edits, time/weather sets) are refused
+    outright while MCBOT_INGAME_ACTIONS=0, which is the default and is the server owner's rule, not a piece of
+    implementation
+    detail. When the switch is on they still need a pressed confirmation button, and they can never come from
+    an in-game ask.
+  - out-of-game operations (the whitelist family) need a turn whose confirmation button was pressed. An ask
+    that has only been *described* cannot perform one.
+
+Nothing here is a secret: `mc-rcon --explain <command>` prints the decision and sends nothing, so a human can
+check what mcbot would do before finding out the hard way, and the test suite asserts the classification
+without a game server running.
+
+Usage:
+  mc-rcon <command> [...]     join the arguments into one console command and run it
+  mc-rcon status              version, who is online, and which switches are live
+  mc-rcon --explain <cmd>     classify and decide, send nothing
+"""
+
+from __future__ import annotations
+
+import asyncio
+import os
+import sys
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)                                 # bin/, where gate.py lives
+sys.path.insert(0, os.path.dirname(HERE))                # the library root, where config_table.py lives
+
+import config_table as cfg  # noqa: E402
+from gate import audit, capabilities, decide_rcon, turn_mode  # noqa: E402
+
+# Where rcon.py lives, from configuration rather than from a path written into the wrapper. It has to be
+# resolved before it is used, which is why this sits after the imports above rather than with them.
+sys.path.insert(0, cfg.value_of("MCBOT_LIB"))
+
+REFUSED = 77
+
+
+def settings() -> tuple[str, int, str, float]:
+    """Where the console is, from the deployment. There is no default host to fall back to.
+
+    The previous default named one Service, in one namespace, in one cluster. In an installation that names
+    things differently it produced a connection error that read like a network fault, which is a worse failure
+    than a message that names the variable that is missing.
+    """
+    host = os.environ.get("MCBOT_RCON_HOST", "").strip()
+    if not host:
+        raise SystemExit("mc-rcon: MCBOT_RCON_HOST is not set, so there is no server console to talk to "
+                         "(see docs/configuration.md)")
+    port = int(cfg.value_of("MCBOT_RCON_PORT"))
+    password = os.environ.get("MCBOT_RCON_PASSWORD", "")
+    if not password:
+        raise SystemExit("mc-rcon: MCBOT_RCON_PASSWORD is not set; the console connection is authenticated")
+    quiet = float(cfg.value_of("MCBOT_RCON_QUIET"))
+    return host, port, password, quiet
+
+
+def _rcon():
+    """Import the RCON client only when a command is actually going to be sent.
+
+    `--explain` answers questions about the rules and must work where there is no game, no /opt/mcbot and no
+    network - which is exactly the environment the test suite runs in, and the environment a human has when a
+    build is broken.
+    """
+    sys.path.insert(0, cfg.value_of("MCBOT_LIB"))
+    from rcon import Rcon, RconError  # noqa: PLC0415 - the laziness is the point
+    return Rcon, RconError
+
+
+async def send(command: str) -> str:
+    Rcon, RconError = _rcon()
+    host, port, password, quiet = settings()
+    if not password:
+        raise RconError("MCBOT_RCON_PASSWORD is not set")
+    client = Rcon(host, port, password, timeout=15.0, quiet=quiet)
+    try:
+        return await client.command(command)
+    finally:
+        await client.close()
+
+
+def explain(command: str) -> int:
+    allowed, kind, why = decide_rcon(command)
+    caps = capabilities()
+    mode = turn_mode()
+    print(f"command:     {command}")
+    print(f"class:       {kind}")
+    print(f"allowed:     {'yes' if allowed else 'no'}")
+    print(f"why:         {why}")
+    print(f"turn:        surface={mode.get('surface', '?')} readonly={mode.get('readonly', '?')} "
+          f"approved={mode.get('approved', '?')}")
+    print(f"switches:    server_actions={caps['server_actions']} ingame_actions={caps['ingame_actions']} "
+          f"plugins={', '.join(caps['plugins']) or 'none'}")
+    return 0 if allowed else REFUSED
+
+
+async def status() -> int:
+    lines = []
+    for command in ("version", "list"):
+        allowed, kind, why = decide_rcon(command)
+        audit("mc-rcon", tool="mc-rcon", allowed=allowed, detail=f"{kind}: {why}", argv=[command])
+        if not allowed:
+            return REFUSED
+        try:
+            lines.append(await send(command))
+        except Exception as exc:  # noqa: BLE001 - RconError and anything the lazy import could not load
+            print(f"mc-rcon: {command} failed: {exc}", file=sys.stderr)
+            return 1
+    caps = capabilities()
+    mode = turn_mode()
+    print("\n".join(lines))
+    print(f"switches: server_actions={caps['server_actions']} ingame_actions={caps['ingame_actions']} "
+          f"plugins={', '.join(caps['plugins']) or 'none'} | "
+          f"turn: surface={mode.get('surface', '?')} readonly={mode.get('readonly', '?')} "
+          f"approved={mode.get('approved', '?')}")
+    return 0
+
+
+def main(argv: list[str]) -> int:
+    # `mc-rcon` takes a console command, not flags, because the useful shape is `mc-rcon "whitelist add bob"`.
+    # That means a bare `--help` would otherwise be *sent to the server as a command* - which the gate would
+    # correctly refuse, and the model would read as "the bot cannot even print its own usage".
+    if argv and argv[0] in ("-h", "--help"):
+        print(__doc__)
+        return 0
+    if argv and argv[0] == "--explain":
+        if len(argv) < 2:
+            print("usage: mc-rcon --explain <command>", file=sys.stderr)
+            return 2
+        return explain(" ".join(argv[1:]))
+    if not argv:
+        print(__doc__, file=sys.stderr)
+        return 2
+    command = " ".join(argv).strip()
+    if command == "status":
+        return asyncio.run(status())
+
+    allowed, kind, why = decide_rcon(command)
+    audit("mc-rcon", tool="mc-rcon", allowed=allowed, detail=f"{kind}: {why}", argv=[command])
+    if not allowed:
+        print(why, file=sys.stderr)
+        print("mcbot gate: nothing was sent to the server.", file=sys.stderr)
+        return REFUSED
+    try:
+        answer = asyncio.run(send(command))
+    except Exception as exc:  # noqa: BLE001 - a failed send is an operator problem, not a stack trace
+        print(f"mc-rcon: {exc}", file=sys.stderr)
+        return 1
+    print(answer or "(no output)")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

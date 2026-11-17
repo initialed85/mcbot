@@ -1,0 +1,54 @@
+# The cluster permissions mcbot actually uses, and no others.
+#
+# This is the narrowest layer in the design and it is deliberately *not* baked into the program: a bot whose
+# own repository decided its RBAC would widen itself in the same commit that asked for it. Copy this file, point
+# it at your namespace, and take verbs out until something you care about stops working.
+#
+# What each verb is for:
+#   get/list on pods, services, PVCs      "what is running", "how big is the volume"
+#   pods/log                              the in-game ask path reads the server's chat out of its log
+#   delete on pods                        a restart. A GitOps controller reconciles it either way, which is why
+#                                         this is not the scary verb it looks like
+#   get/list on configmaps                reading the deployment it is allowed to talk about
+#   create/update/patch on configmaps,
+#   update/patch on statefulsets          ONLY if you let mcbot apply changes through kubectl. If your changes
+#                                         arrive as a git commit that a controller reconciles - which is the
+#                                         intended path - delete these four lines and the bot cannot write to
+#                                         the cluster at all, whatever a wrapper gets wrong.
+#   pods/exec                             the log tail. See docs/security.md: if you would rather not allow a
+#                                         command inside the server pod, drop this and read logs via the API.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: mcbot
+  namespace: mcbot
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: mcbot
+  namespace: mcbot
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "pods/log", "services", "persistentvolumeclaims", "configmaps"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["delete"]
+  - apiGroups: ["apps"]
+    resources: ["statefulsets"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: mcbot
+  namespace: mcbot
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: mcbot
+subjects:
+  - kind: ServiceAccount
+    name: mcbot
+    namespace: mcbot

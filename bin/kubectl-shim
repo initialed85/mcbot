@@ -1,0 +1,61 @@
+#!/usr/bin/env python3
+"""`kubectl`, as mcbot's agent sees it: the same binary, with the write verbs behind a pressed button.
+
+Installed as /usr/local/bin/kubectl, earlier on PATH than the real binary (which stays available as
+$MCBOT_KUBECTL_REAL, by default /usr/local/bin/kubectl-real). Every `kubectl` the Pi agent runs goes through
+here, and the decision is made by `gate.decide_kubectl` - which reads the turn record bot.py wrote before the
+ask - rather than by anything the model was told.
+
+Why this exists when the ServiceAccount already has RBAC. RBAC says this identity may patch StatefulSets in
+one namespace; it cannot say *this particular ask* was confirmed by a person. The two layers answer different
+questions and both are needed: RBAC bounds the blast radius, this wrapper bounds the intent.
+
+What is refused:
+  - every write verb (apply, patch, delete, exec, ...) unless this turn has a pressed confirmation button
+    and is not an in-game turn;
+  - everything, writes included, when out-of-game actions are switched off (MCBOT_SERVER_ACTIONS=0).
+
+What is never touched here: reads. `get`, `describe`, `logs`, `top`, `diff`, `wait`, and `rollout status` work
+in every turn, because answering "is it up" and "why did it crash" is the reason the bot exists, and a gate
+that makes those hard gets used as a reason to turn the gate off.
+
+The escape hatch is a human one, on purpose: `kubectl-real` is the unwrapped binary and it is right there for
+anybody with a shell in the pod. Nothing in this file is a secret the model has to be kept away from; it is a
+default the model does not get to waive.
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from gate import audit, decide_kubectl  # noqa: E402
+
+REAL = os.environ.get("MCBOT_KUBECTL_REAL", "").strip() or "/usr/bin/kubectl"
+# A distinct exit code, so `kubectl` failing because mcbot said no is never mistaken for the API server
+# saying no. 77 is EX_NOPERM on the systems that have such a thing.
+REFUSED = 77
+
+
+def main(argv: list[str]) -> int:
+    allowed, verb, why = decide_kubectl(argv)
+    audit("kubectl", tool="kubectl", allowed=allowed, detail=f"{verb or 'no verb'}: {why}", argv=argv)
+    if not allowed:
+        print(why, file=sys.stderr)
+        print("mcbot gate: nothing was sent to the API server.", file=sys.stderr)
+        return REFUSED
+    if not os.path.exists(REAL):
+        # Loud rather than helpful: a missing real binary means the image is built wrong, and guessing which
+        # kubectl to run instead is how a wrapper outlives its own configuration.
+        print(f"mcbot gate: {REAL} is missing, so this wrapper has nothing to run. Refusing.", file=sys.stderr)
+        return 2
+    # execv, not subprocess: stdin, stdout, stderr, signals and the exit code all belong to kubectl, and a
+    # wrapper that re-implements them becomes the thing that breaks `kubectl logs -f`.
+    os.execv(REAL, [REAL] + argv)
+    return 0  # unreachable
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

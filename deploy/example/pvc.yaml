@@ -1,0 +1,23 @@
+# Optional: the durable version of the writable volume, if you want the audit log and the queue to survive a
+# redeploy. The Deployment mounts `data` at /data either way; swap the `emptyDir` for
+# `persistentVolumeClaim: { claimName: mcbot-data }` and keep `strategy: Recreate`, because two gateways sharing
+# one queue is a worse bug than a slow rollout.
+#
+# Nothing here needs a big volume: it is a git checkout, a sqlite file, a turn record and a log of decisions.
+# Check what your storage class reserves before asking for more than this.
+#
+# Access mode is a storage question, not an mcbot question, with one exception worth knowing: the queue is
+# sqlite, and mcbot chooses its journal mode from the mount that actually holds the file - WAL on a local
+# filesystem, DELETE on a network one (nfs4, and network-attached block storage that behaves like it). If you
+# switch to `ReadWriteMany` on network-attached storage, that is the setting that changes with it, and
+# `test-bot-policy.py` keeps both halves honest.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mcbot-data
+  namespace: mcbot
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 2Gi

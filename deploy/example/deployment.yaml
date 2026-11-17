@@ -1,0 +1,105 @@
+# The pod itself. Nothing in here is mcbot-specific except the command it runs and the paths it writes to.
+#
+# Three things in this file are load-bearing for the security story, and the policy suite asserts all of them:
+#
+#   * `readOnlyRootFilesystem: true` with one writable volume. The program, its wrappers, its persona and its
+#     tests are read-only to the agent; only `MCBOT_DATA` is writable. An agent that can edit the code deciding
+#     what it may do has no sandbox, whatever the prompt says.
+#   * `strategy: Recreate`. The bot supervises a long-lived pi child and holds an in-flight ask; a RollingUpdate
+#     would run two gateways against one Discord token and one queue at the same moment.
+#   * the deploy key mounted `0440`. It has to be readable by the pod's uid, which is the difference between a
+#     clone that works and a `Permission denied` that reads like a bad key.
+#
+# Fill in the image, the ingress-free assumption, and your own ServiceAccount name. `deploy/example/rbac.yaml`
+# is the shape the bot expects.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mcbot
+  namespace: mcbot
+  labels:
+    app: mcbot
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: mcbot
+  template:
+    metadata:
+      labels:
+        app: mcbot
+    spec:
+      serviceAccountName: mcbot
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+      containers:
+        - name: mcbot
+          image: ghcr.io/your-org/mcbot:pin-me-to-a-digest
+          imagePullPolicy: Always
+          envFrom:
+            - configMapRef:
+                name: mcbot-config
+            - secretRef:
+                name: mcbot-secret
+          env:
+            # The one writable place, and the reason every path in the configuration table hangs off it.
+            - name: MCBOT_DATA
+              value: /data
+          ports:
+            - name: health
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            initialDelaySeconds: 15
+            periodSeconds: 30
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            initialDelaySeconds: 45
+            periodSeconds: 30
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            # The git deploy key, read-only, for the repository in MCBOT_REPO_URL. `MCBOT_GIT_KEY_MOUNT` is where
+            # the entrypoint looks for it, and the entrypoint copies it to 0600 under MCBOT_SSH_DIR before ssh
+            # will accept a key that any uid could otherwise read. Omit this whole mount if you are not letting
+            # mcbot commit anything: with MCBOT_SERVER_ACTIONS=0 it never needs one.
+            - name: deploy-key
+              mountPath: /mnt/git-key
+              readOnly: true
+      volumes:
+        - name: data
+          emptyDir: {}
+        # A queue, an audit log and a git checkout that is re-cloned at startup: disposable by design, so a
+        # rollout is also the point at which an approval is forgotten. Use a PersistentVolumeClaim instead if you
+        # want the audit log to survive a redeploy - see deploy/example/pvc.yaml.
+        - name: deploy-key
+          secret:
+            secretName: mcbot-deploy-key
+            # 0440, not 0600: the pod runs as 10001 and root owns the mount, so a tighter mode is a pod that
+            # cannot read its own key and a clone failure that reads like a bad credential. GitHub's host keys
+            # are baked into the image at /etc/ssh/ssh_known_hosts, so only the private key is mounted.
+            defaultMode: 0440
+            items:
+              - key: id_ed25519
+                path: id_ed25519

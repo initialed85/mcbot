@@ -1,0 +1,4 @@
+# mcbot runtime. Pinned: the image is rebuilt on every change to this directory, so an unpinned
+# transitive is a build that silently changes behaviour between two commits.
+discord.py==2.7.1
+aiohttp==3.13.3

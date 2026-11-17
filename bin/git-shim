@@ -1,0 +1,314 @@
+#!/usr/bin/env python3
+"""git wrapper: the only part of the GitOps tree mcbot may write is the prefix it was given.
+
+Installed as `git` earlier on PATH than the real binary, so every git the agent runs - through
+its own `bash` tool, or through a script it writes - goes through here. The point is that the
+restriction does not depend on the model being well-behaved: a `git commit` whose staged files
+leave `ALLOWED_PREFIX` is refused by this process, whatever the model believed it was doing.
+
+Environment:
+  MCBOT_GIT_REAL      absolute path to the real git (default /usr/bin/git)
+  MCBOT_REPO          repo worktree to police (default $MCBOT_DATA/repo)
+  MCBOT_ALLOWED_PREFIX path prefix the bot may commit (required; with no prefix set, nothing is committable)
+  MCBOT_GIT_LOG       audit log path (default /data/audit/git.jsonl)
+
+MCBOT_REPO's default follows MCBOT_DATA because that is what entrypoint.sh clones into (`$DATA/repo`)
+and what it exports for the bot. The default only matters for a shell that did *not* inherit that export -
+`kubectl exec`, a CronJob, a debug session - and a default pointing at a directory that never exists makes
+every call in such a shell read like the sandbox refusing to let the bot do its job. It is a refusal with
+the wrong name attached, and it is indistinguishable from a real denial unless you go looking.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+# The same rules `kubectl` and `mc-rcon` apply, in the same file. A commit inside the allowed prefix of a
+# GitOps tree is not a bookkeeping act: whatever controller watches that path reconciles it, so committing and
+# pushing is how mcbot changes the running cluster. It gets the same permission check the other two tools get,
+# and the same switch.
+sys.path.insert(0, os.path.dirname(os.path.realpath(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(os.path.abspath(__file__)))))
+from gate import plugin_allowed, server_actions_on, turn_mode  # noqa: E402
+import config_table as cfg  # noqa: E402
+
+REAL = cfg.value_of("MCBOT_GIT_REAL")
+REPO = cfg.value_of("MCBOT_REPO")
+# Deliberately no default. The old one named one repository's layout; a public repository cannot assume
+# somebody else's tree. Unset means nothing is committable - see
+# `outside()`, where an empty prefix must not read as "everything is inside the prefix".
+ALLOWED_PREFIX = os.environ.get("MCBOT_ALLOWED_PREFIX", "").strip()
+AUDIT = cfg.value_of("MCBOT_GIT_LOG")
+ALLOWED_BRANCH = os.environ.get("MCBOT_ALLOWED_BRANCH", "").strip() or cfg.entry("MCBOT_ALLOWED_BRANCH").default
+
+# Subcommands that can rewrite history or reach outside this worktree.
+DENIED_SUBCOMMANDS = {
+    "filter-branch", "filter-repo", "replace", "worktree", "submodule",
+    "remote", "bisect", "notes", "stash",
+}
+
+
+def audit(event: str, detail: dict) -> None:
+    try:
+        Path(AUDIT).parent.mkdir(parents=True, exist_ok=True)
+        rec = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "event": event, **detail}
+        with open(AUDIT, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(rec, sort_keys=True) + "\n")
+    except OSError:
+        pass  # auditing must never block or fake a refusal
+
+
+def git(*args: str, check: bool = False) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [REAL, *args], cwd=REPO if os.path.isdir(REPO) else None,
+        capture_output=True, text=True, check=check
+    )
+
+
+def run(argv: list[str], env: dict | None = None, capture: bool = False):
+    """Invoke the real git, tolerating a worktree that is not there yet.
+
+    The entrypoint clones before the bot serves a single message, but `git --version` during a Docker
+    build, or a diagnostic before the clone exists, hits this with no repo. cwd on a missing directory
+    is an unhandled FileNotFoundError with a traceback (measured: it broke the image build), and that
+    reads to a caller like a sandbox malfunction rather than an ordinary "no such directory". So the
+    directory is only used when it exists.
+    """
+    cwd = REPO if os.path.isdir(REPO) else None
+    return subprocess.run([REAL, *argv], cwd=cwd, env=env,
+                          capture_output=capture, text=capture)
+
+
+def passthrough(argv: list[str]) -> int:
+    proc = run(argv)
+    return proc.returncode
+
+
+def refuse(msg: str, argv: list[str]) -> int:
+    audit("refused", {"argv": argv, "reason": msg})
+    sys.stderr.write(f"mcbot-git: REFUSED - {msg}\n")
+    return 1
+
+
+def outside(paths: list[str]) -> list[str]:
+    bad = []
+    if not ALLOWED_PREFIX:
+        # Not "then everything is allowed". `"anything".startswith("")` is True, which is how a blank prefix
+        # would have quietly opened the whole tree. An unset prefix means nobody told this deployment where
+        # mcbot may write, so there is no path it may commit.
+        return [p.strip() for p in paths if p.strip()]
+    for p in paths:
+        p = p.strip()
+        if not p:
+            continue
+        if p.startswith("./"):
+            p = p[2:]
+        if p.startswith("/"):
+            # Absolute path: allow only inside the prefix inside this repo.
+            if p.startswith(f"{REPO}/{ALLOWED_PREFIX}"):
+                continue
+            bad.append(p)
+            continue
+        if not p.startswith(ALLOWED_PREFIX):
+            bad.append(p)
+    return bad
+
+
+def publish_permission(sub: str) -> str:
+    """Why this commit or push is allowed to publish, or why it is not. Empty string means allowed.
+
+    A push to `master` in this repository is a deploy: Argo watches the path and applies it. So the two
+    questions the other tools answer get answered here too - is mcbot allowed to change the server at all
+    today (MCBOT_SERVER_ACTIONS), and did a person press the confirmation button for this specific change
+    (the turn record bot.py writes before each ask). An in-game ask fails both: it is read-only, and a name
+    in a chat window is not a button.
+    """
+    if not server_actions_on():
+        return (f"`git {sub}` is refused: out-of-game actions are switched off in mcbot's config "
+                f"(MCBOT_SERVER_ACTIONS=0), so it answers questions and changes nothing")
+    mode = turn_mode()
+    if mode.get("readonly"):
+        return (f"`git {sub}` is refused: this ask came from inside the game, where mcbot answers questions "
+                f"and changes nothing. Say what the change would do and that it has to be asked for in the "
+                f"Discord channel")
+    if not mode.get("approved"):
+        return (f"`git {sub}` is refused: nothing has been confirmed for this turn yet. Describe the change, "
+                f"emit the [[CONFIRM]] marker, and publish it in the turn that follows a pressed button")
+    return ""
+
+
+def staged_files() -> list[str]:
+    proc = git("-c", "core.quotepath=false", "diff", "--cached", "--name-only",
+               "--diff-filter=ACMRD")
+    if proc.returncode != 0:
+        raise RuntimeError(proc.stderr.strip() or "could not read the staged diff")
+    return proc.stdout.splitlines()
+
+
+def main() -> int:
+    argv = sys.argv[1:]
+    # Fail as a refusal, not a traceback: if a base image move ever puts git somewhere else, every
+    # call must say so plainly and non-zero rather than crash on ENOENT.
+    if not os.path.isfile(REAL) or not os.access(REAL, os.X_OK):
+        audit("error", {"argv": argv, "reason": f"real git missing at {REAL}"})
+        sys.stderr.write(f"mcbot-git: the real git is not at {REAL}; refusing to guess where it is\n")
+        return 1
+    # A wrapper that calls itself is a fork bomb with extra steps, and it is an easy mistake: PATH in
+    # the mcbot image puts the wrapper at /usr/local/bin/git, so anything deriving MCBOT_GIT_REAL from
+    # `command -v git` gets this file. (test-git-shim.sh did exactly that and only failed in the built
+    # image.) Compare resolved paths, and refuse rather than recurse.
+    if os.path.realpath(REAL) == os.path.realpath(os.path.abspath(sys.argv[0])):
+        audit("error", {"argv": argv, "reason": f"MCBOT_GIT_REAL is the wrapper itself ({REAL})"})
+        sys.stderr.write(
+            "mcbot-git: MCBOT_GIT_REAL points back at this wrapper; the real git binary is required\n"
+        )
+        return 1
+    # Skip global options to find the subcommand (only the ones we actually expect).
+    idx = 0
+    while idx < len(argv) and argv[idx].startswith("-"):
+        opt = argv[idx]
+        if opt in ("-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path"):
+            idx += 2
+        else:
+            idx += 1
+    # With no worktree there is nothing to police, and `git --version` has to answer here for the same
+    # reason the entrypoint's PATH check does: the image is built before the repository is cloned.
+    # Before the no-subcommand fallback: with no worktree there is nothing to police, and the obvious
+    # fallback (the caller's cwd) would run real git against *some other* repository while looking
+    # sandboxed. So answer informational flags - the image build needs `git --version` before
+    # the repository is cloned - and refuse anything with consequences until the mount is fixed.
+    if not os.path.isdir(os.path.join(REPO, ".git")):
+        informational = {"--version", "--help", "-h", "-v", "--exec-path", "--htmlhelp", "--man"}
+        if idx >= len(argv) and (not argv or argv[0] in informational):
+            audit("passthrough", {"argv": argv, "reason": "not a repo, informational"})
+            return passthrough(argv)
+        return refuse(f"the repository is not mounted at {REPO}; refusing to run git against wherever you happen to be standing", argv)
+    if idx >= len(argv):
+        return passthrough(argv)
+    sub = argv[idx]
+    rest = argv[idx + 1:]
+
+    if sub in DENIED_SUBCOMMANDS:
+        return refuse(f"`git {sub}` is not available to mcbot", argv)
+
+    if sub in ("push",) and any(a in ("--delete", "-d") or a.startswith("refs/tags") for a in rest):
+        return refuse("mcbot cannot delete refs or push tags", argv)
+
+    if sub == "add":
+        paths = [a for a in rest if not a.startswith("-")]
+        bad = outside(paths)
+        if bad:
+            return refuse(f"these paths are outside mcbot's area: {', '.join(bad[:6])}", argv)
+        proc = run(argv)
+        if proc.returncode == 0 and any(a in ("-A", "--all", ".") for a in rest):
+            # `git add -A` expands to whatever changed, so the named-path check proves nothing.
+            # Re-read the index and undo the staging if it swept past the fence.
+            bad = outside(staged_files())
+            if bad:
+                git("reset", "--quiet")
+                return refuse(
+                    f"`git add {rest}` staged files outside mcbot's area: {', '.join(bad[:6])}", argv
+                )
+        return proc.returncode
+
+    if sub == "commit":
+        try:
+            files = staged_files()
+        except RuntimeError as exc:
+            return refuse(str(exc), argv)
+        if not files:
+            return refuse("nothing staged - refusing an empty commit", argv)
+        bad = outside(files)
+        if bad:
+            return refuse(
+                f"staged files are outside mcbot's area ({ALLOWED_PREFIX}): {', '.join(bad[:6])}", argv
+            )
+        if "--no-verify" in rest:
+            return refuse("mcbot cannot skip hooks with --no-verify", argv)
+        jars = [f for f in files if not plugin_allowed(f)[0]]
+        if jars:
+            # A jar is arbitrary code running as the server process, and it is the one thing in this path the
+            # path fence cannot judge. Names come from MCBOT_PLUGIN_ALLOWLIST; an empty list means none.
+            why = plugin_allowed(jars[0])[1]
+            return refuse(f"mcbot may not commit plugin jars: {why} (offending paths: "
+                          f"{', '.join(jars[:4])})", argv)
+        why = publish_permission("commit")
+        if why:
+            return refuse(why, argv)
+        env = dict(os.environ)
+        # The author identity comes from configuration too. A commit mcbot makes is attributed, in a repository
+        # other people read, and an address baked into the image is a piece of somebody's domain shipped to
+        # everyone - plus it is the identity a maintainer filters history by.
+        git_name = cfg.value_of("MCBOT_GIT_NAME")
+        git_email = cfg.value_of("MCBOT_GIT_EMAIL")
+        env.setdefault("GIT_AUTHOR_NAME", git_name)
+        env.setdefault("GIT_AUTHOR_EMAIL", git_email)
+        env.setdefault("GIT_COMMITTER_NAME", git_name)
+        env.setdefault("GIT_COMMITTER_EMAIL", git_email)
+        proc = run(argv, env=env)
+        audit("commit", {"argv": argv, "code": proc.returncode, "files": files})
+        return proc.returncode
+
+    if sub == "push":
+        # Only the branch we deploy from, and only if its head commits stay in the sandbox.
+        refs = [a for a in rest if not a.startswith("-")]
+        if any(":" in r for r in refs):
+            return refuse("mcbot cannot push refspecs (src:dst)", argv)
+        branch = ""
+        proc = git("rev-parse", "--abbrev-ref", "HEAD")
+        if proc.returncode == 0:
+            branch = proc.stdout.strip()
+        if refs and refs[-1] not in (branch, "HEAD"):
+            return refuse(f"mcbot may only push its own checked-out branch {branch!r}", argv)
+        if branch != ALLOWED_BRANCH:
+            return refuse(f"mcbot may only push {ALLOWED_BRANCH!r}, HEAD is {branch!r}", argv)
+        if any(a in ("-f", "--force", "--force-with-lease") or a.startswith("--force") for a in rest):
+            return refuse("mcbot cannot force push", argv)
+        # Everything the push would publish must be inside the allowed prefix.
+        unpushed = git("-c", "core.quotepath=false", "log", "@{upstream}..HEAD",
+                       "--name-only", "--pretty=format:")
+        if unpushed.returncode != 0:
+            return refuse("could not determine what this push would publish", argv)
+        changed = [ln for ln in unpushed.stdout.splitlines() if ln.strip()]
+        bad = outside(changed)
+        if bad:
+            return refuse(
+                f"unpushed commits touch files outside mcbot's area: {', '.join(sorted(set(bad))[:6])}",
+                argv,
+            )
+        if not changed:
+            return refuse("nothing to push", argv)
+        why = publish_permission("push")
+        if why:
+            return refuse(why, argv)
+        res = run(argv)
+        audit("push", {"argv": argv, "code": res.returncode, "files": sorted(set(changed))})
+        return res.returncode
+
+    if sub in ("reset", "restore", "checkout", "clean", "revert", "merge", "rebase", "cherry-pick"):
+        # Not destructive-history operations by themselves, but they can blow away work outside
+        # the sandbox, so require pathspecs inside the allowed prefix when given.
+        paths = [a for a in rest if not a.startswith("-")]
+        hard = sub in ("clean", "reset") and any(a in ("--hard", "-x", "-fd", "-df") for a in rest)
+        if hard and not paths:
+            return refuse(f"`git {sub}` without pathspecs would affect the whole tree", argv)
+        bad = outside([p for p in paths if "=" not in p and p not in ("--", ".")])
+        if bad:
+            return refuse(f"`git {sub}` names paths outside mcbot's area: {', '.join(bad[:6])}", argv)
+        audit("allowed", {"argv": argv})
+        return passthrough(argv)
+
+    audit("allowed", {"argv": argv})
+    return passthrough(argv)
+
+
+if __name__ == "__main__":
+    if shutil.which("git") != os.path.abspath(sys.argv[0]):
+        pass  # PATH ordering is the Dockerfile's business; do not self-check at runtime
+    sys.exit(main())

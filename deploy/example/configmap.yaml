@@ -1,0 +1,65 @@
+# Example configuration for mcbot. Every value here is a placeholder on purpose: the variables that describe a
+# deployment (which Discord server, which channel, which pod, which console, which inference endpoint) have no
+# defaults in this repository, and a repository that shipped working ones would be shipping somebody else's
+# infrastructure.
+#
+# What each variable is for, and which are required, is in docs/configuration.md. `hack/check-mcbot-config.py`
+# will tell you which ones you forgot before the pod tells you.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mcbot-config
+  namespace: mcbot
+data:
+  # --- where mcbot is allowed to speak -------------------------------------------------------------
+  MCBOT_GUILDS: "<discord-guild-id>"
+  MCBOT_CHANNELS: "<discord-channel-id>,<another-channel-id>"
+  # `anyone` means anyone who reached a permitted channel may press the confirmation button. It is the right
+  # answer for a family server and the wrong one for anything else, so it is stated here rather than inherited.
+  MCBOT_APPROVER_MODE: allowlist
+  MCBOT_APPROVER_IDS: "<discord-user-id>"
+
+  # --- what mcbot is capable of at all -----------------------------------------------------------
+  # Both switches default off in the code. Saying them out loud is the point: an upgrade that changes a default
+  # should change this file too, or nobody is reviewing what the bot can do.
+  MCBOT_SERVER_ACTIONS: "0"
+  MCBOT_INGAME_ACTIONS: "0"
+  # Where the turn record lives: the one file the wrappers read to know whether a button was pressed for this
+  # ask. It is reset at pod start, so an approval cannot outlive the deployment that asked for it.
+  MCBOT_TURN_MODE: /data/turn.json
+  MCBOT_PLUGIN_ALLOWLIST: ""
+
+  # --- the repository it commits to --------------------------------------------------------------
+  # A commit inside MCBOT_ALLOWED_PREFIX is applied by whatever GitOps controller watches that path, so this is
+  # the single most consequential pair of values in the deployment.
+  MCBOT_REPO_URL: "git@github.com:your-org/your-manifests.git"
+  MCBOT_REPO_BRANCH: master
+  MCBOT_ALLOWED_PREFIX: "apps/minecraft/"
+
+  # --- the server it talks to --------------------------------------------------------------------
+  # Required while the in-game ask path is on (it is on by default). The pod is the one whose log is read as
+  # chat; the RCON host is where answers and any permitted command go.
+  MCBOT_INGAME: "1"
+  MCBOT_INGAME_NAMESPACE: "<namespace>"
+  MCBOT_INGAME_POD: "<server-pod>"
+  MCBOT_INGAME_CONTAINER: server
+  MCBOT_RCON_HOST: "<server-service>"
+  MCBOT_RCON_PORT: "25575"
+
+  # --- the model it thinks with ------------------------------------------------------------------
+  PI_PROVIDER: local
+  PI_MODEL: auto
+  MCBOT_PI_BASE_URL: "http://<your-openai-compatible-endpoint>:8080/v1"
+  # The *name* of the variable holding the key, so the key itself never appears in this file or in the generated
+  # models.json. Set it to whatever key your Secret calls.
+  MCBOT_PI_API_KEY_ENV: MCBOT_PI_API_KEY
+
+  # --- images, optional --------------------------------------------------------------------------
+  # With MCBOT_VISION_URL unset, a screenshot is answered with "[vision is disabled]" rather than sent to an
+  # endpoint nobody chose. If you set it, set the model too.
+  # MCBOT_VISION_URL: "http://<your-vision-endpoint>/v1/chat/completions"
+  # MCBOT_VISION_MODEL: "<vision-model-id>"
+
+  # --- writable footprint ------------------------------------------------------------------------
+  # One variable moves the database, the queue, the audit log and the turn record.
+  MCBOT_DATA: /data

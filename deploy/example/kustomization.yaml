@@ -1,0 +1,11 @@
+# `kubectl kustomize deploy/example` renders the whole example, which is also the quickest way to see that the
+# pieces fit together before anything is applied. `secret.example.yaml` is deliberately NOT in this list: the
+# example deployment refers to a Secret that you create out of band, because a repository that ships a Secret
+# manifest with placeholders trains people to commit one with real values.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - namespace.yaml
+  - rbac.yaml
+  - configmap.yaml
+  - deployment.yaml
