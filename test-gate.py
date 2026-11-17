@@ -311,11 +311,17 @@ with tempfile.TemporaryDirectory() as td:
     bindir.mkdir()
     # A turn file that is not there at all, so every wrapper under this arrangement is exercising the fail-closed
     # branch rather than inheriting the approved turn an earlier section wrote.
+    # Each wrapper's *real* binary is stubbed. This assertion is about module resolution through a symlink, and
+    # it must not depend on what happens to be installed in the step running it: the CI gate step is
+    # python:3.12-slim, which contains no git at all, so `git-shim --help` - which is a passthrough, since --help
+    # has no consequences - exited 1 with "the real git is not at /usr/bin/git". That is a broken assertion
+    # failing for an honest reason, and it gates nothing: on a workstation with git it passed, in CI it never
+    # could. The stub is the same one the kubectl section above uses.
     link_env = dict(env, MCBOT_DATA=str(Path(td) / "turn.json"),
                     MCBOT_TURN_MODE=str(Path(td) / "absent-turn.json"),
                     MCBOT_AUDIT=str(Path(td) / "audit.jsonl"),
                     MCBOT_REPO_URL="git@example.test:org/mcbot.git", MCBOT_ALLOWED_PATHS="apps/minecraft/",
-                    MCBOT_KUBECTL_REAL="/bin/true")
+                    MCBOT_KUBECTL_REAL="/bin/true", MCBOT_GIT_REAL=str(stub))
     for name in ("git-shim", "kubectl-shim", "mc-rcon"):
         link = bindir / name
         os.symlink(str(BIN / name), str(link))

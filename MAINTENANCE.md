@@ -92,6 +92,12 @@ Two things about that file are easy to get wrong:
   `event: push, branch: master`, so a pipeline that never existed when the push happened will not retroactively
   run. The first build needs another commit.
 
+- **The gate step's image has almost nothing in it.** `test-policy` runs in `python:3.12-slim` on purpose - no
+  dependencies, no secrets, no image - so a suite that shells out to `git` or `kubectl` fails there and passes on
+  a workstation, which is an assertion about the machine rather than about the code. Any wrapper test must name
+  its own real binary through `MCBOT_GIT_REAL` / `MCBOT_KUBECTL_REAL` and point it at a stub. `test-config.py` is
+  in the image step for the same reason: it imports `bot.py`, which imports `discord.py`.
+
 The one thing worth checking by hand after a build: the tag the pin lands on is `$CI_COMMIT_SHA`, so the pushed
 image tag and the manifest `newTag` are the same 40 characters, and the pod's `.status.containerStatuses[].imageID`
 digest should match what the build step logged. A `:latest` alone proves nothing about which commit is running.
