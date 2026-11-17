@@ -302,6 +302,36 @@ check(proc.returncode == 77 and "private" in proc.stdout, "a whisper is refused 
 proc = subprocess.run([str(BIN / "mc-rcon"), "--explain", "list"], env=env, capture_output=True, text=True)
 check(proc.returncode == 0 and "read" in proc.stdout, "list is a read")
 
+# --- the arrangement the image actually uses: these wrappers are symlinks in /usr/local/bin -----------
+# A wrapper that finds its own modules with `dirname(abspath(__file__))` works on a checkout and fails at
+# `RUN ln -sf ... && mc-rcon --help` inside the build, because the link's directory is /usr/local/bin and
+# gate.py is not there. All three import config_table, gate, or both, so all three are run this way.
+with tempfile.TemporaryDirectory() as td:
+    bindir = Path(td) / "bin"
+    bindir.mkdir()
+    # A turn file that is not there at all, so every wrapper under this arrangement is exercising the fail-closed
+    # branch rather than inheriting the approved turn an earlier section wrote.
+    link_env = dict(env, MCBOT_DATA=str(Path(td) / "turn.json"),
+                    MCBOT_TURN_MODE=str(Path(td) / "absent-turn.json"),
+                    MCBOT_AUDIT=str(Path(td) / "audit.jsonl"),
+                    MCBOT_REPO_URL="git@example.test:org/mcbot.git", MCBOT_ALLOWED_PATHS="apps/minecraft/",
+                    MCBOT_KUBECTL_REAL="/bin/true")
+    for name in ("git-shim", "kubectl-shim", "mc-rcon"):
+        link = bindir / name
+        os.symlink(str(BIN / name), str(link))
+        proc = subprocess.run([str(link), "--help"], env=link_env, capture_output=True, text=True)
+        check(proc.returncode == 0 and "Traceback" not in proc.stderr,
+              f"{name} resolves its own modules through the image's symlink")
+    # And the refusal still happens through the link, which is the part that would be embarrassing to lose:
+    # a wrapper that imports fine but forgets the gate is a wrapper with a nicer error message.
+    # The capability is armed here, so the reason has to be the missing turn record rather than the switch:
+    # a wrapper that reaches its modules but not its state file is the failure mode that would look fine.
+    proc = subprocess.run([str(bindir / "kubectl-shim"), "delete", "pod", "x"],
+                          env=dict(link_env, MCBOT_SERVER_ACTIONS="1"),
+                          capture_output=True, text=True)
+    check(proc.returncode == 77 and "button" in proc.stderr,
+          "a refusal through the symlink still refuses, and still names the button it is waiting for")
+
 print()
 if FAILURES:
     print(f"{len(FAILURES)} FAILURE(S):")

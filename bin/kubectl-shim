@@ -29,7 +29,8 @@ from __future__ import annotations
 import os
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# See git-shim: the image reaches these by symlink, so the real file's directory is the one to search.
+sys.path.insert(0, os.path.dirname(os.path.realpath(os.path.abspath(__file__))))
 
 from gate import audit, decide_kubectl  # noqa: E402
 

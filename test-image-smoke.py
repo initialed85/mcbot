@@ -207,8 +207,13 @@ def main() -> int:
     # nothing set" then reads somebody else's endpoint and passes for the wrong reason - which is worse than
     # failing, because it looks like a default that works.
     import config_table as cfg
+    # The two exceptions are the variables `--path` exists to assert. `MCBOT_GIT_REAL` and
+    # `MCBOT_KUBECTL_REAL` are set by the Dockerfile's own ENV instructions, so in the build they are the image
+    # speaking; scrubbing them made the check read an absence and report that the image had not named a real
+    # binary, which was the scrub's own doing.
+    keep = {"MCBOT_GIT_REAL", "MCBOT_KUBECTL_REAL"} if "--path" in sys.argv else set()
     for name in list(os.environ):
-        if name.startswith("MCBOT_") or name.startswith("PI_"):
+        if (name.startswith("MCBOT_") or name.startswith("PI_")) and name not in keep:
             del os.environ[name]
 
     if "--path" in sys.argv:

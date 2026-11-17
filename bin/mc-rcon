@@ -31,7 +31,9 @@ import asyncio
 import os
 import sys
 
-HERE = os.path.dirname(os.path.abspath(__file__))
+# `realpath`, not `abspath`: in the image these wrappers are symlinks in /usr/local/bin, and a wrapper that
+# locates its own modules by the link's directory imports nothing.
+HERE = os.path.dirname(os.path.realpath(os.path.abspath(__file__)))
 sys.path.insert(0, HERE)                                 # bin/, where gate.py lives
 sys.path.insert(0, os.path.dirname(HERE))                # the library root, where config_table.py lives
 

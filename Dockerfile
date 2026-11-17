@@ -52,6 +52,12 @@ COPY entrypoint.sh test-git-shim.sh test-sandbox-adversarial.sh /opt/mcbot/
 COPY test-rcon.py test-image-smoke.py test-gate.py test-config.py test-bot-policy.py /opt/mcbot/
 COPY hack/ /opt/mcbot/hack/
 COPY docs/ /opt/mcbot/docs/
+# The example deployment travels in the image for two reasons: `test-config.py` asserts the checker passes
+# against it (a checker that has never been pointed at a real manifest is a checker nobody has used), and
+# whoever is debugging a pod can read the shape the pod was supposed to be started from without leaving it.
+COPY Dockerfile /opt/mcbot/Dockerfile
+COPY README.md /opt/mcbot/README.md
+COPY deploy/ /opt/mcbot/deploy/
 COPY workspace/ /opt/mcbot/workspace/
 COPY bin/ /opt/mcbot/bin/
 RUN chmod 0755 /opt/mcbot/entrypoint.sh /opt/mcbot/bin/git-shim /opt/mcbot/bin/kubectl-shim \
@@ -84,6 +90,13 @@ RUN ln -sf /opt/mcbot/bin/kubectl-shim /usr/local/bin/kubectl \
 # moving what leaves the process. In the image there is no .git, so this scans the files the image actually
 # ships, which is the stricter version of the question.
 RUN python3 /opt/mcbot/test-config.py
+
+# The policy suite is the largest one and the slowest, and it is the one that asserts the *rules* rather than
+# the wiring: what a button is for, what an in-game ask may never do, what a refusal says, which tier an
+# answer falls in, and how the bot behaves when its own child is cut off. It reads the Dockerfile too, which is
+# why the Dockerfile ships in the image: an artifact that cannot be checked against the recipe that made it
+# leaves the checking to whoever remembers to look.
+RUN python3 /opt/mcbot/test-bot-policy.py
 
 # The gate is asserted at build time, with the wrappers that will actually be on PATH in the running image.
 # bin/gate.py is pure logic and needs no secrets and no network, so a broken permission rule fails the build
