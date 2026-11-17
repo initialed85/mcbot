@@ -17,7 +17,11 @@ metadata:
   name: mcbot-data
   namespace: mcbot
 spec:
-  accessModes: ["ReadWriteOnce"]
+  # ReadWriteMany first, because a bot restarted one at a time still benefits from a volume that is not welded
+  # to a node: an RWO volume follows the node it attached to, and a stuck re-attach on the way back is a pod
+  # sitting in ContainerCreating with nothing in its log to say why. If your storage class cannot do RWX, this
+  # is the line to change, and nothing else about mcbot cares.
+  accessModes: ["ReadWriteMany"]
   resources:
     requests:
       storage: 2Gi

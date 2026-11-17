@@ -1056,6 +1056,69 @@ def deployment_checker() -> None:
 
     code, out = run([str(broken / "typo.yaml"), str(broken / "missing.yaml")])
     check(code == 1, "a deployment split across files is checked as one deployment")
+    check(out.count("required and absent") == 1,
+          "and a variable missing from the whole deployment is named once, not once per file", out[-400:])
+
+    # A Secret applied out of band is the normal arrangement, and the pod gets its names from `valueFrom`. A
+    # checker that cannot see through that indirection demands an RCON password from a deployment that has one,
+    # which is the kind of false alarm that gets a checker ignored.
+    split = TMP / "split"
+    split.mkdir(parents=True, exist_ok=True)
+    cm = (HERE / "deploy" / "example" / "configmap.yaml").read_text()
+    # One switch is deliberately absent from the ConfigMap and present only as a `valueFrom` in the pod, so the
+    # merge rule (a value a file states beats a name a manifest promises) cannot make the assertion below
+    # pass by accident.
+    (split / "configmap.yaml").write_text(cm.replace('  MCBOT_INGAME_ACTIONS: "0"\n', ''))
+    secret_text = (HERE / "deploy" / "example" / "secret.example.yaml").read_text()
+    (split / "secret.yaml").write_text(secret_text
+                                       .replace("MCBOT_RCON_PASSWORD", "rcon-password-key")
+                                       .replace("MCBOT_PI_API_KEY", "ROOTER_KEY"))
+    (split / "deployment.yaml").write_text(f'''apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mcbot
+spec:
+  template:
+    spec:
+      containers:
+        - name: mcbot
+          env:
+            - name: MCBOT_RCON_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mcbot-secret
+                  key: rcon-password-key
+            - name: MCBOT_PI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: mcbot-secret
+                  key: pi-key
+            - name: MCBOT_INGAME_ACTIONS
+              valueFrom:
+                secretKeyRef:
+                  name: mcbot-secret
+                  key: gate-switch
+''')
+    code, out = run([str(split / "configmap.yaml"), str(split / "secret.yaml"), str(split / "deployment.yaml")])
+    check(code == 0, "a password the pod receives by valueFrom counts as supplied", out[-400:])
+    check("MCBOT_RCON_PASSWORD is supplied by valueFrom" in out,
+          "and the checker says it cannot see the value rather than guessing at it", out[-500:])
+    check("MCBOT_RCON_PASSWORD is present but empty" not in out,
+          "and does not report an injected name as empty", out[-400:])
+    check("supplied by valueFrom; this checker cannot see whether it is on" in out,
+          "a capability switch injected from a Secret is not reported as armed on the strength of its name",
+          out[-600:])
+
+    # The provider key is the one variable whose name is configured rather than fixed (`MCBOT_PI_API_KEY_ENV`),
+    # so a deployment that injects whatever that says is not "setting a variable this build does not read".
+    (split / "renamed.yaml").write_text(cm.replace('MCBOT_PI_API_KEY_ENV: "MCBOT_PI_API_KEY"',
+                                                   'MCBOT_PI_API_KEY_ENV: "ROOTER_KEY"')
+                                        .replace('MCBOT_RCON_PASSWORD: "<rcon-password>"', ''))
+    (split / "injected.yaml").write_text(
+        (split / "deployment.yaml").read_text().replace("MCBOT_PI_API_KEY", "ROOTER_KEY"))
+    code, out = run([str(split / "renamed.yaml"), str(split / "secret.yaml"), str(split / "injected.yaml")])
+    check(code == 0 and "ROOTER_KEY" not in out.replace("MCBOT_PI_API_KEY_ENV", ""),
+          "the api key named by MCBOT_PI_API_KEY_ENV is understood as the key, not as a stray variable", out[-400:])
 
 
 def main() -> int:
