@@ -369,8 +369,25 @@ MODIFIER_RE = re.compile(r"^(no[, ]|actually|wait|also|and\b|plus|but\b|i mean|n
 # which component wrote the line, and both carry ANSI cursor-control junk from the server console in front of
 # them (`>....\x1b[K[06:21:44 INFO]: <SomePlayer> hi`), so the match is on the `]: <name> ` seam rather than
 # on an anchored line shape. Read from the real log, not from the documentation.
+#
+# What the pattern refuses is the safety property, so it is written down instead of left as regex:
+#   - a join or quit line (`Notch joined the game`) has no `<name>`, so it cannot be an ask;
+#   - a player issuing a command is logged as `Steve issued server command: /plugins`, which has no closing
+#     `>`, so it is not chat either;
+#   - `[Not Secure]` is allowed as an optional prefix rather than treated as a reason to refuse: Paper writes
+#     it for a client that skipped chat signing, and an unsigned ask is still an ask from a player who is
+#     in the game. It is the one prefix that has to be matched by hand, which is why the name rule below is
+#     what stops it from also matching the bot's own traffic.
+#   - `<name>` is `[A-Za-z0-9_]{1,16}` because that is the name set Minecraft itself allows, so no other
+#     bracketed prefix can read as a player - including `[Server] `, which is how a console or RCON `say` is
+#     printed back. That is what stops the tail from answering its own broadcasts: every answer this bot gives
+#     in game arrives on this same stdout, and the pattern that accepts a player's line refuses the bot's.
 ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
-CHAT_LINE_RE = re.compile(r"\]:\s*<(?P<name>[A-Za-z0-9_]{1,16})>\s(?P<text>.*)$")
+# The optional `[Not Secure] ` is Paper marking an unsigned or unencrypted source - it appears on player
+# chat from a client that skipped chat signing, and on the bot's own RCON traffic. Accepting it cannot
+# make the bot read itself: after it, the pattern still needs `<name>`, and what follows a broadcast is
+# `[Rcon]` or `<[Server]>`, neither of which is a name.
+CHAT_LINE_RE = re.compile(r"\]:\s*(?:\[Not Secure\]\s*)?<(?P<name>[A-Za-z0-9_]{1,16})>\s(?P<text>.*)$")
 # In-game answers to an open offer. `yes` alone in family chat must never approve a destructive change, so an
 # in-game press has to carry the trigger like every other in-game ask.
 INGAME_YES_RE = re.compile(r"^(yes|y|do it|confirm|go ahead|do it)\b[.!]?$", re.I)
@@ -1491,6 +1508,17 @@ class McBot(discord.Client):
 
         `--tail=0` matters: a restarted pod must not answer an hour of old chat. The reconnect loop is because
         the server pod can roll underneath us while this one stays up.
+
+        Read `CHAT_LINE_RE` strictly: a join or quit line has no `<name>`, a command a player issued has no
+        closing `>`, and `[Server] ` - how the server prints a console or RCON `say` - is refused, which is what
+        keeps this loop from answering its own broadcasts. `[Not Secure]`, which Paper puts in front of an
+        unencrypted Java client's chat, is deliberately *not* special-cased: it marks the transport, not the
+        line. ANSI cursor junk is stripped before the match, because the server console writes it.
+
+        `MCBOT_INGAME_CONTAINER` is a container **id**, not the name the manifest gives the container. On this
+        server the manifest says `minecraft` and the pod says `server`, and `kubectl logs -c minecraft` is
+        refused outright: the tail then does not tail, `game_tailing` reports false, and every in-game ask is
+        silently unanswered while the Discord half of the bot looks entirely healthy.
         """
         backoff = 5.0
         while not self.is_closed():

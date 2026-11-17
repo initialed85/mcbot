@@ -1387,6 +1387,29 @@ def main() -> int:
     check("a command a player issued is not treated as chat",
           any(m and m["name"] == "Steve" for m in parsed[2:5]), False)
     check("voicechat and advancement noise does not look like chat", parsed[3], None)
+    check("a player joining is not chat", bot.CHAT_LINE_RE.search("Notch joined the game"), None)
+    check("the server's own broadcast is not chat, so the tail cannot answer itself",
+          bot.CHAT_LINE_RE.search("[06:53:05 INFO] [Server thread/INFO]: <[Server]> mcbot: Java: 1.2.3.4"), None)
+    # The `[Not Secure] ` shape is taken from a live log line this server wrote for its own RCON traffic
+    # (`]: [Not Secure] [Rcon] mcbot: ...`), which is the only place this cluster has produced the tag. Paper
+    # puts the same tag in front of chat from a client that skipped chat signing, and that is a player.
+    check("an unsigned client's chat line is still chat",
+          bot.CHAT_LINE_RE.search("[06:53:06 INFO] [Server thread/INFO]: [Not Secure] <Notch> hello").group("name"),
+          "Notch")
+    check("the same tag in front of the bot's own RCON traffic is still not chat",
+          bot.CHAT_LINE_RE.search("[06:53:07 INFO]: [Not Secure] [Rcon] mcbot: Java: 203.0.2.5:25565"), None)
+
+    # --- 20a. the tail has to name the container the pod actually has -------------------------------
+    # `kubectl logs -c` matches a container id, not whatever the manifest calls the container. On the server
+    # this bot was written against, those two words are `server` and `minecraft`, and getting them the other way
+    # round makes every ask fail in silence: no chat lines, `tailing: false` in healthz, Discord still fine.
+    with open(os.path.join(HERE, "deploy", "example", "configmap.yaml")) as fh:
+        example_cm = fh.read()
+    check("the shipped example names the container id, not the manifest's container name",
+          "MCBOT_INGAME_CONTAINER: server" in example_cm, True)
+    with open(os.path.join(HERE, "config_table.py")) as fh:
+        check("the knob that decides which container is tailed is a declared variable",
+              "MCBOT_INGAME_CONTAINER" in fh.read(), True)
 
     class GameRpc:
         def __init__(self, replies, delay=0.05):

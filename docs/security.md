@@ -65,6 +65,12 @@ in. If `MCBOT_GIT_REAL` resolves back to the wrapper itself, it refuses rather t
 `MCBOT_RCON_HOST` is unset, `mc-rcon` names the variable rather than connecting to a hostname remembered from
 somebody else's cluster.
 
+The in-game answer path is the one place the wrapper hands a credential to the wire, so the wire is kept small
+by configuration rather than by trust: `MCBOT_RCON_HOST` is a cluster-internal Service that exists only for RCON
+(a ClusterIP, so it has no external address at all), on a port that is not in the server's published Service, and
+`MCBOT_RCON_PASSWORD` is a Secret rather than a ConfigMap value. Both matter because that password is what the
+Pi bridge holds on every in-game answer - it is not a credential only a human types.
+
 ## Layer 3 — the turn record
 
 `$MCBOT_DATA/turn.json` is written before every ask:
