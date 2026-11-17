@@ -89,8 +89,15 @@ Two things about that file are easy to get wrong:
   moving a pipeline to a new repository needs no secret work; the deploy key being repository-scoped is the blast
   radius, not a per-pipeline setup step.
 - **Activating a repository does not build the commit it was activated on.** The lane is gated to
-  `event: push, branch: master`, so a pipeline that never existed when the push happened will not retroactively
+  `event: push, branch: master`, so a pipeline that did not exist when the push happened will not retroactively
   run. The first build needs another commit.
+- **A lane that publishes nothing is not necessarily a lane that never ran.** The first build of this repository
+  looked exactly like an inactive repository: no tag, no bump, and a badge route that answers with the SPA. It had
+  in fact run and failed in `test-policy` in 13 seconds. Without UI access the ground truth is one read-only query
+  against the CI's own Postgres (`kubectl -n <ci namespace> exec deploy/<postgres> -- psql -U $POSTGRES_USER -d
+  $POSTGRES_DB`): `pipelines` joined to `steps` says which step died, and `log_entries.data` (bytea, ordered by
+  `line`) is the step's full output. The server's own log only carries `level=error` events, so a failed lane is
+  not in it.
 
 - **The gate step's image has almost nothing in it.** `test-policy` runs in `python:3.12-slim` on purpose - no
   dependencies, no secrets, no image - so a suite that shells out to `git` or `kubectl` fails there and passes on
