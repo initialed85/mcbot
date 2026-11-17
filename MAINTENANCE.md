@@ -74,6 +74,28 @@ The game port is published because players need it. RCON is not.
   the old and new RCON ports. Both should refuse, while the game port still answers. That measurement is the
   only thing distinguishing "internal" from "in a Service I never look at".
 
+## The CI lane, and what it needs from you
+
+`.woodpecker/build.yaml` is the whole path from a push to a rollout: `test-policy` runs the stdlib suites on the
+clone, `build-and-push` builds and publishes `:$CI_COMMIT_SHA` and `:latest`, and `deploy-manifests` runs the
+`wp-kustomize-deploy` plugin, which stamps the commit sha into the manifests repository and pushes. That commit
+*is* the deploy - Argo CD reconciles it, and `git revert` of the one `newTag` line is the rollback.
+
+Two things about that file are easy to get wrong:
+
+- **The registry credentials and the write key are not per-repository.** They are Secrets in the CI's own
+  namespace (`dockerhub` with keys `username`/`token`, and `home-ops-deploy-key` with `id_ed25519`/`known_hosts`),
+  which every lane in this deployment reaches through the workflow's `backend_options.kubernetes.secrets`. So
+  moving a pipeline to a new repository needs no secret work; the deploy key being repository-scoped is the blast
+  radius, not a per-pipeline setup step.
+- **Activating a repository does not build the commit it was activated on.** The lane is gated to
+  `event: push, branch: master`, so a pipeline that never existed when the push happened will not retroactively
+  run. The first build needs another commit.
+
+The one thing worth checking by hand after a build: the tag the pin lands on is `$CI_COMMIT_SHA`, so the pushed
+image tag and the manifest `newTag` are the same 40 characters, and the pod's `.status.containerStatuses[].imageID`
+digest should match what the build step logged. A `:latest` alone proves nothing about which commit is running.
+
 ## Where the security decisions are written
 
 `docs/security.md` - what the wrappers, the RBAC, the turn record and the capability switches are for. The

@@ -13,9 +13,13 @@ steps:
     # Pure-stdlib assertions about who may make mcbot write, what counts as "just asking", how RCON is framed,
     # and what the wrappers do when they decide no. No dependencies, no secrets, runs on the clone rather than
     # the built image - which is the point: these are the checks that must fail before anything is published.
+    #
+    # test-config.py is NOT here, deliberately: it imports bot.py to assert the vision-injection contract, and
+    # bot.py imports discord.py, so it cannot run in a dependency-free step. It runs in build-and-push, inside
+    # the published image, which is the only place discord.py exists. A pipeline that fails with
+    # ModuleNotFoundError in the gate step gates nothing; it just stops publishing.
     image: docker.io/library/python:3.12-slim
     commands:
-      - python3 test-config.py
       - python3 test-bot-policy.py
       - python3 test-rcon.py
       - python3 test-gate.py
@@ -91,7 +95,7 @@ steps:
       - docker run --rm --entrypoint python3 "$IMAGE:$CI_COMMIT_SHA" /opt/mcbot/test-image-smoke.py
       # The startup contract, with stubbed git/kubectl/pi and a local repository: it must refuse when a required
       # variable is missing, clone from the URL it was given, and generate pi's provider file rather than ship
-      # somebody's.
+      # somebody's. Runs inside the image because it imports bot.py, which imports discord.py.
       - docker run --rm --entrypoint python3 "$IMAGE:$CI_COMMIT_SHA" /opt/mcbot/test-config.py
       - docker run --rm --entrypoint pi "$IMAGE:$CI_COMMIT_SHA" --version
       - docker run --rm --entrypoint kubectl "$IMAGE:$CI_COMMIT_SHA" version --client
