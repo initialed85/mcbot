@@ -74,11 +74,14 @@ steps:
       - docker push "$IMAGE:latest"
       - docker inspect --format 'digest={{.RepoDigests}}' "$IMAGE:$CI_COMMIT_SHA"
       # The wrapper has to win on PATH. If this ever prints something other than the wrapper, the bot has an
-      # unguarded `git` and the premise of the sandbox is gone, so fail the build rather than deploy it.
+      # unguarded `git`/`kubectl` and the premise of the sandbox is gone, so fail the build rather than deploy
+      # it. Asserting the *real* path here would be the bug in this file: /usr/bin/kubectl is what the wrapper
+      # execs, not what the agent resolves.
       - docker run --rm --entrypoint sh "$IMAGE:$CI_COMMIT_SHA"
         -c 'test "$(command -v git)" = /usr/local/bin/git; echo "git resolves to $(command -v git)"'
       - docker run --rm --entrypoint sh "$IMAGE:$CI_COMMIT_SHA"
-        -c 'test "$(command -v kubectl)" = /usr/bin/kubectl; test -x /usr/local/bin/mc-rcon; echo "wrappers on PATH"'
+        -c 'test "$(command -v kubectl)" = /usr/local/bin/kubectl; test "$(command -v mc-rcon)" = /usr/local/bin/mc-rcon;
+            test -x /usr/bin/kubectl; echo "wrappers on PATH, real kubectl still reachable as MCBOT_KUBECTL_REAL"'
       # And the wrapper has to actually refuse, not merely exist: run the boundary suite against a scratch repo
       # inside the built image.
       - docker run --rm --entrypoint bash "$IMAGE:$CI_COMMIT_SHA" /opt/mcbot/test-git-shim.sh
