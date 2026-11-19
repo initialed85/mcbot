@@ -3,3 +3,7 @@ __pycache__/
 .venv/
 .env
 ___secret/
+
+# The owner's private name list. Its whole purpose is to stay out of the repository: a public repo that
+# spells out one person's hostnames, cluster names and family names as a blocklist is publishing the leak.
+hygiene.private.txt

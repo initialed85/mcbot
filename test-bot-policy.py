@@ -760,9 +760,9 @@ def main() -> int:
     past = [FakeMsg("mic check"),
             FakeMsg("look at this", attachments=[att("crash.png", "image/png", 1234)]),
             FakeMsg("who is online?")]
-    past[0].author = types.SimpleNamespace(id=1, display_name="mason", bot=False)
+    past[0].author = types.SimpleNamespace(id=1, display_name="player_one", bot=False)
     past[1].author = types.SimpleNamespace(id=2, display_name="mcbot", bot=True)
-    past[2].author = types.SimpleNamespace(id=1, display_name="mason", bot=False)
+    past[2].author = types.SimpleNamespace(id=1, display_name="player_one", bot=False)
     m = FakeMsg("what was I saying?")
     ch = HistChannel(past)
     m.channel = ch
@@ -770,7 +770,7 @@ def main() -> int:
     check("the ask is answered with Discord's history, not just what mcbot has seen", len(ctx), 3)
     check("history() is called once, with the configured limit and this message as the cursor",
           ch.seen, [(20, m)])
-    check("it comes back oldest first", ctx[0], "mason: who is online?")
+    check("it comes back oldest first", ctx[0], "player_one: who is online?")
     check("mcbot's own earlier answers are labelled as its own", ctx[1].startswith("you said earlier: look at this"),
           True)
     check("an image in the history is labelled without spending a vision call on it",
@@ -805,9 +805,9 @@ def main() -> int:
     bot.load_config()
 
     prompt = bot.build_prompt(222, "what does this say?", "", approved=True,
-                              context=["mason: look at this", "mcbot: [1 attachment(s): image/png]"],
+                              context=["player_one: look at this", "mcbot: [1 attachment(s): image/png]"],
                               images=["[image crash.png: NullPointerException at net.minecraft]"])
-    check("the prompt carries the Discord context", "- mason: look at this" in prompt, True)
+    check("the prompt carries the Discord context", "- player_one: look at this" in prompt, True)
     check("the prompt carries the transcription", "NullPointerException" in prompt, True)
     check("the prompt no longer tells children to find a parent", "ask a parent" in prompt, False)
     check("an unapproved turn points at the button instead",
@@ -873,7 +873,7 @@ def main() -> int:
         if i in (1, 2, 4, 5):
             stale[i].author = types.SimpleNamespace(id=9, display_name="mcbot", bot=True)
         else:
-            stale[i].author = types.SimpleNamespace(id=1, display_name="mason", bot=False)
+            stale[i].author = types.SimpleNamespace(id=1, display_name="player_one", bot=False)
     m = FakeMsg("and the line after that?")
     m.channel = HistChannel(stale)
     ctx = asyncio.run(b._context(m))
@@ -952,7 +952,7 @@ def main() -> int:
 
     def qmsg(content):
         m = types.SimpleNamespace(content=content, attachments=[], id=len(content))
-        m.author = types.SimpleNamespace(id=11, display_name="mason", bot=False)
+        m.author = types.SimpleNamespace(id=11, display_name="player_one", bot=False)
         m.guild = types.SimpleNamespace(id=22)
         m.channel = types.SimpleNamespace(id=777)
 
@@ -1403,7 +1403,7 @@ def main() -> int:
     # `kubectl logs -c` matches a container id, and that id is not inferable from the other names in a
     # deployment: on the server this bot was written against the app directory, ConfigMap, PVC and volume are all
     # `minecraft` while the pod's one container is `server`, so `-c minecraft` is the natural wrong guess and
-    # kubectl refuses it ("container minecraft is not valid for pod server-0 out of: server"). Getting it wrong
+    # and kubectl refuses it outright, naming the containers that pod really has. Getting it wrong
     # makes every ask fail in silence: no chat lines, `tailing: false` in healthz, Discord still fine.
     with open(os.path.join(HERE, "deploy", "example", "configmap.yaml")) as fh:
         example_cm = fh.read()

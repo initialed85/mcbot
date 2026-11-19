@@ -1518,10 +1518,10 @@ class McBot(discord.Client):
         `MCBOT_INGAME_CONTAINER` is a container **id**, and a pod's container id is not guessable from the names
         around it. On the server this was written against, the application directory, the ConfigMap, the PVC and
         the volume are all called `minecraft` and the pod's one container is called `server`, so
-        `kubectl logs -c minecraft` is the obvious wrong guess - and it is refused outright ("container minecraft
-        is not valid for pod server-0 out of: server"): the tail then does not tail, `game_tailing` reports false,
-        and every in-game ask is silently unanswered while the Discord half of the bot looks entirely healthy.
-        Ask the pod which containers it has; do not read them out of a manifest's vocabulary.
+        `kubectl logs -c minecraft` is the obvious wrong guess - and kubectl refuses it outright, naming the
+        containers that pod really has. The tail then does not tail, `game_tailing` reports false, and every
+        in-game ask is silently unanswered while the Discord half of the bot looks entirely healthy. Ask the pod
+        which containers it has; do not read them out of a manifest's vocabulary.
         """
         backoff = 5.0
         while not self.is_closed():

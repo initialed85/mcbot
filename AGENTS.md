@@ -37,6 +37,8 @@ and what the capability switches actually arm).
     bin/kubectl-shim       the `kubectl` on PATH: reads always, write verbs only in an approved turn
     bin/mc-rcon            the only route to the server console; classifies before it sends anything
     workspace/AGENTS.md    the persona the in-pod agent reads (three tiers, copy-first, the [[CONFIRM]] marker)
+    hygiene.py             the private-artefact scan: shapes only, and it proves itself before it reports
+    hygiene.private.txt    owner-only and gitignored: the names that must never appear in a public file
     test-*.py, test-*.sh   the suites, described below
     hack/check-mcbot-config.py   deployment completeness checker (manifests and .env, no cluster access)
 
@@ -45,6 +47,7 @@ and what the capability switches actually arm).
 `bin/gate.py` and the wrappers *are* the security behaviour. The model's good intentions are not, so the
 boundary is asserted by running it. Each suite exists because something was once believed rather than measured.
 
+    python3 hygiene.py               every tracked file, for a hostname / person / real Discord id
     python3 test-bot-policy.py      who may make mcbot write, what counts as "just asking", tier classification
     python3 test-rcon.py            RCON framing against a server modelled on measured behaviour
     python3 test-gate.py            gate.py decisions, and the wrappers run as real processes
@@ -62,11 +65,15 @@ Three rules these suites teach the hard way:
 - **A stub cannot report a missing attribute.** `discord.CommandTree` passed a stubbed import, passed a plain
   `import bot`, and then killed the pod at startup. Construction against the real dependency is the assertion -
   that is what `test-image-smoke.py` is for, and why it runs twice (Dockerfile build and CI).
-- **Do not let a suite assert about its runner.** `test-policy` runs in `python:3.12-slim` with no dependencies
-  and no secrets so it can refuse a publish before anything is built. That means the image has no `git` and no
-  `kubectl` in it: a wrapper test that shells out must name its own real binary (`MCBOT_GIT_REAL`,
-  `MCBOT_KUBECTL_REAL`) and point it at a stub. `git-shim --help` passing through to a git that does not exist
-  ate two pipelines. Same reason `test-config.py` belongs in the image step and not the gate step.
+- **Do not let a suite assert about its runner.** `test-policy` runs in `python:3.12-slim`: no dependencies, no
+  secrets, no built image, chosen so it can refuse a publish before anything exists. Measured on that image: it
+  has neither `git` nor `kubectl`. So `git-shim --help` - a passthrough, since `--help` has no consequences -
+  exits 1 with "the real git is not at /usr/bin/git", and an assertion that the wrapper resolves its modules
+  through the image's symlink fails there and passes on a workstation that has git installed. An assertion about
+  what the runner happens to have is not an assertion about the code, and it ate two pipelines before it was
+  fixed: a wrapper test that shells out names its own real binary (`MCBOT_GIT_REAL`, `MCBOT_KUBECTL_REAL`) and
+  points it at a stub the suite made. `test-config.py` belongs in the image step for a different reason: it
+  imports `bot.py`, which imports `discord.py`.
 - **A refusal that is not tested is a rumour.** Every "this must be refused" case is a case in a suite. Sections
   written against allowlist semantics have to actually be in allowlist mode: pinned to the deployed
   `anyone` mode, `can_approve()` said yes to everyone and every refusal check passed for the wrong reason.
@@ -125,6 +132,45 @@ That is also the difference between a change being reviewable and a change being
 
 Nothing in this repository may carry a live hostname, Discord id, personal path, credential or cluster name -
 including in tests and fixtures, which is where this rule gets broken by accident. Fixture values are
-`example.test` and synthetic ids. `deploy/example/` holds placeholders. `workspace/AGENTS.md` describes the
+`example.test` and synthetic ids, `deploy/example/` holds placeholders, and `workspace/AGENTS.md` describes the
 persona in terms of `{{REPO_NAME}}` and `{{ALLOWED_PREFIX}}` because the entrypoint substitutes them at startup
 rather than baking in an owner's paths.
+
+`hygiene.py` is that rule as a program, and it is deliberately built out of **shapes rather than names**:
+
+- an RFC1918 or link-local address (documentation ranges like `203.0.113.9` and `.test` / `.invalid` hostnames are
+  allowed, because a check that flags reserved example values trains people to switch it off);
+- a hostname that resolves only somewhere private, and a Kubernetes service suffix built on a *specific* cluster
+  domain - the generic `svc.cluster.local` shape is documentation and a fork needs it, one cluster's own suffix is
+  a fingerprint;
+- a real Discord id (a snowflake is a timestamp in disguise, so it has almost no repeated digits; a fixture id is
+  a repeated digit, and `real_snowflake` is what lets the suites hold ids at all);
+- a real name where a real name gets written - a name-shaped value on a `name` / `user` / `player` key. A single
+  common first name has no shape that separates it from a placeholder, and that limit is stated rather than papered
+  over.
+
+**The names themselves are not in the repository, and they never go in.** A public repository whose blocklist
+spells out one family's names, one cluster's names and one tailnet range is publishing the exact thing the
+blocklist exists to prevent. They live in `hygiene.private.txt` beside `hygiene.py`, gitignored, read when present
+and silently unused when absent. So the check runs in two strengths, and the split is honest rather than elegant:
+on the owner's machine it knows the names; in CI and in a fork it enforces the shapes only. Closing that gap means
+feeding the file to the gate step as a CI secret, which is a decision about the CI deployment and is listed under
+Open items in `MAINTENANCE.md` rather than being quietly half-done here.
+
+It runs twice, for two different questions. In the gate step it runs against the **clone**, which is the only place
+a document anybody installs gets looked at - and a document is where a hostname actually survives, because nobody
+reads comments and a maintenance note that names a pod is published exactly as readily as code that names one.
+Inside the build it runs against **what the image ships**, which is the stricter question about what a stranger
+receives. There is no git binary in the gate step's image, so `hygiene.py` walks the workspace instead of asking
+git for a list; that fallback is load-bearing, not convenience.
+
+Exemptions are `hygiene.py` and `test-image-smoke.py` - files that have to write down what they forbid in order to
+forbid it - plus `.woodpecker/`, exempt for a stated reason rather than an assumed one: a workflow has to name the
+daemon it builds against and the image it publishes, it is the owner's file, and nothing in the shipped program
+reads it. `hygiene.py --selftest` (which runs as part of a normal run) checks that each exemption is still earned:
+an exemption that has outlived its reason is worse than none, because it hides the next leak. Adding an exemption
+is a decision a reviewer should see, and the selftest is what makes it visible.
+
+And when the scanner refuses a commit, fix the leak rather than the scanner. Quoting a real error message from a
+live pod is how this rule was last broken in a docstring; the useful part of that message was its *shape*, and the
+pod name in it was noise.

@@ -41,6 +41,7 @@ sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE / "bin"))
 
 import config_table as cfg  # noqa: E402
+import hygiene as hyp  # noqa: E402
 
 FAILURES: list[str] = []
 TMP = Path(tempfile.mkdtemp(prefix="mcbot-config-test-"))
@@ -51,46 +52,11 @@ SOURCES = [
     "entrypoint.sh",
 ]
 
-# Names a shipped default may not contain. Each of these was true of this program's defaults until this suite
-# was written, which is the reason it exists.
-HOST_LITERALS = (
-    "initialed85",
-    ".svc.cluster.local",
-    ".initialed85.cc",
-    "image-classifier.dev",
-    "rooter.rooter",
-    "home-ops",
-    "home-dev",
-    "home-prod",
-    "clusters/dev/applications/minecraft/",
-    "server-0",
-    "beefcake",
-    # A private address is a fingerprint of one network. In a public repository it is the same leak as a
-    # hostname, with the additional charm that it looks like a placeholder until somebody's router is on it.
-    "192.168.",
-)
-# People. A persona file or a test fixture that names a child is a private thing that got published.
-PERSON_LITERALS = ("Augie", "August", "Ellie", "Elliott", "Mason", "Volt_plays", "Beech")
-SNOWFLAKE_RE = re.compile(r"\b\d{15,20}\b")
-
-
-def real_snowflake(text: str) -> list[str]:
-    """Discord ids that look like ids rather than like fixtures.
-
-    A fixture id is a repeated digit; a real snowflake is a timestamp in disguise and has almost no repeated
-    digits. The distinction is what lets a test suite hold ids at all: what must not be published is an id that
-    identifies somebody's actual server, bot or user.
-    """
-    return [m.group(0) for m in SNOWFLAKE_RE.finditer(text) if len(set(m.group(0))) >= 6]
-
-
-def tracked_files() -> list[Path]:
-    """Everything in the repository that a stranger would receive."""
-    r = subprocess.run(["git", "ls-files"], cwd=HERE, capture_output=True, text=True)
-    if r.returncode == 0 and r.stdout.strip():
-        return [HERE / p for p in r.stdout.splitlines() if (HERE / p).exists()]
-    return [p for p in HERE.rglob("*")
-            if p.is_file() and ".venv" not in p.parts and ".git" not in p.parts]
+# What counts as private lives in hygiene.py, so the gate step (which runs it against the clone, where every
+# document is on disk) and this in-image scan cannot drift apart. It is pattern-shaped on purpose: a public
+# repository that carries one person's hostnames, repository names and pod names as a blocklist is publishing the
+# very thing the blocklist exists to protect.
+findings = hyp.findings
 
 
 def check(ok, what, detail="") -> None:
@@ -193,33 +159,15 @@ def defaults_are_portable() -> None:
     section("no default describes somebody else's deployment")
     for e in cfg.declared():
         blob = f"{e.default} {e.purpose} {e.when}"
-        hit = next((h for h in HOST_LITERALS if h in blob), None)
-        check(hit is None, f"{e.name} default and description name no deployment", hit or "")
-        check(not SNOWFLAKE_RE.search(blob), f"{e.name} default carries no Discord id", blob)
-        check(not any(p in blob for p in PERSON_LITERALS), f"{e.name} names no person", blob)
+        hits = findings(blob)
+        check(not hits, f"{e.name} default and description name no private address, host, person or id",
+              ", ".join(hits))
 
     # The whole tree, not the files this check happened to remember. A private hostname that survived in a
-    # fixture, a comment or a shell script is published the moment the repository is, and the reason it
-    # survived is that nobody reads comments.
-    offenders: list[str] = []
-    for f in tracked_files():
-        try:
-            text = f.read_text(encoding="utf-8")
-        except (UnicodeDecodeError, IsADirectoryError):
-            continue
-        rel = f.relative_to(HERE).as_posix()
-        if rel == "test-config.py":  # this file has to name the things it forbids
-            continue
-        if rel.startswith(".woodpecker/"):
-            # The pipeline is not code and is not read by the program: it names which daemon builds this image,
-            # which registry publishes it, and which manifests repository it deploys into. Exempting it is what
-            # lets that one file be true rather than placeholder-shaped; a fork rewrites it and nothing else.
-            continue
-        hits = [h for h in HOST_LITERALS if h in text]
-        people = [q for q in PERSON_LITERALS if q in text]
-        ids = real_snowflake(text)
-        if hits or people or ids:
-            offenders.append(f"{rel}: " + ", ".join(hits + people + ids[:3]))
+    # fixture, a comment or a shell script is published the moment the repository is, and the reason it survived
+    # is that nobody reads comments. Here that tree is what the image actually ships; in the gate step the same
+    # rule runs against the clone, which is where a document nobody installs gets looked at.
+    offenders = hyp.scan(HERE)
     check(not offenders, "no file in the repository names somebody's deployment, family or ids",
           "; ".join(offenders))
 
@@ -563,8 +511,13 @@ def injected_kubectl_target() -> None:
         check("main" in argv and "-c" in argv, "the injected container is in the argv", " ".join(argv))
         check("--tail=0" in argv and "-f" in argv, "it tails live chat rather than replaying old chat",
               " ".join(argv))
-        check(not any("server-0" in a or a == "minecraft" for a in argv),
-              "no pod or namespace from the old defaults survives in the argv", " ".join(argv))
+        # Stronger than remembering which old defaults to look for: every name in the command must be one the
+        # deployment injected. A hardcoded pod, namespace or container that nobody thought to name would slip past
+        # a check written as "does it contain the one I remember".
+        injected = {"kubectl", "logs", "paper-7", "arena", "main"}
+        stray = [a for a in argv if not a.startswith("-") and a not in injected]
+        check(not stray, "every name in the kubectl command came from configuration, not from a default",
+              " ".join(stray))
 
 
 # --- the git knobs: prefix, branch and repository are decisions the wrapper makes ----------------------------
@@ -755,7 +708,7 @@ def entrypoint_end_to_end() -> None:
           "the persona is told the real workspace name for the clone", agents[:200])
     check("apps/minecraft/" in agents and "{{ALLOWED_PREFIX}}" not in agents,
           "the persona is told the injected prefix rather than one written into the image", agents[:300])
-    check(not any(h in agents for h in HOST_LITERALS), "the persona names no deployment", agents[:200])
+    check(not findings(agents), "the persona names no deployment or person", agents[:200])
 
     turn = json.loads((data / "turn.json").read_text())
     check(turn.get("approved") is False and turn.get("readonly") is True,
@@ -807,7 +760,7 @@ def models_json_render() -> None:
 
     code, out, err = render({})
     check(code != 0 and "MCBOT_PI_BASE_URL" in err, "with no base URL it refuses and names the variable", err[:200])
-    check(not any(h in out for h in HOST_LITERALS), "nothing deployment-specific is rendered", out[:200])
+    check(not findings(out), "nothing deployment-specific is rendered", out[:200])
 
     check(not (HERE / "pi-models.json").exists(),
           "there is no checked-in provider file with somebody's service names in it")

@@ -11,8 +11,8 @@ An in-game ask is two independent wires, and each one fails on its own.
    server's namespace, `MCBOT_INGAME_POD` naming a pod that exists, and `MCBOT_INGAME_CONTAINER` naming a
    **container id** - which is not inferable from the other names in a deployment. On the server this was written
    against, the app directory, ConfigMap, PVC and volume are all `minecraft` while the pod's single container is
-   `server`, so `kubectl logs -c minecraft` is the natural wrong guess and is refused outright (`container
-   minecraft is not valid for pod server-0 out of: server`). Ask the pod what containers it has.
+   `server`, so `kubectl logs -c minecraft` is the natural wrong guess and kubectl refuses it
+   outright, naming the containers that pod really has. Ask the pod which containers it has.
    The failure is quiet - `ingame.tailing: false` in `/healthz`, every ask silently unanswered, and the Discord
    half still looking perfectly healthy. Check `tailing` before anything else.
 2. **Answer** - RCON `say`. Needs `MCBOT_RCON_HOST` / `MCBOT_RCON_PORT` / `MCBOT_RCON_PASSWORD` to reach the
@@ -86,7 +86,7 @@ clone, `build-and-push` builds and publishes `:$CI_COMMIT_SHA` and `:latest`, an
 Two things about that file are easy to get wrong:
 
 - **The registry credentials and the write key are not per-repository.** They are Secrets in the CI's own
-  namespace (`dockerhub` with keys `username`/`token`, and `home-ops-deploy-key` with `id_ed25519`/`known_hosts`),
+  namespace one for the registry, one for the manifests repository's write key),
   which every lane in this deployment reaches through the workflow's `backend_options.kubernetes.secrets`. So
   moving a pipeline to a new repository needs no secret work; the deploy key being repository-scoped is the blast
   radius, not a per-pipeline setup step.
@@ -110,6 +110,43 @@ Two things about that file are easy to get wrong:
 The one thing worth checking by hand after a build: the tag the pin lands on is `$CI_COMMIT_SHA`, so the pushed
 image tag and the manifest `newTag` are the same 40 characters, and the pod's `.status.containerStatuses[].imageID`
 digest should match what the build step logged. A `:latest` alone proves nothing about which commit is running.
+
+## Private artefacts, and the two strengths of the check
+
+`python3 hygiene.py` walks the repository looking for anything that identifies one person's deployment: a private
+address, a hostname that only resolves somewhere private, a cluster-specific service suffix, a real Discord id, a
+real name. It runs in the CI gate step against the clone (every tracked file, including the documents nobody
+installs) and again inside the build against what the image ships. `AGENTS.md` explains the design; the part that
+matters for maintenance is that it is built out of *shapes*, and the *names* live in `hygiene.private.txt` -
+gitignored, owner-only.
+
+That split is deliberate and it is not complete. A public repository whose blocklist spells out one family's names,
+one cluster's names and one tailnet range is publishing the thing the blocklist exists to prevent, so CI runs the
+shapes and the owner's machine runs the shapes **plus** the names. Concretely: the shapes alone could not have
+caught a pod name, because a pod name is just a word. Two real examples from the same day:
+
+- A docstring that quoted a live `kubectl` error, pod name included. The scanner refused the build. The useful part
+  of that error was its shape, and the pod name in it was noise - so the docstring was rewritten to say what the
+  failure looks like rather than to quote one cluster.
+- An assertion written as "make sure the old hardcoded pod name is not in the command", which contained the pod
+  name it was hunting for. Replaced by a stronger assertion that every name in the command came from the
+  configuration the test injected - which catches the defaults nobody thought to name.
+
+A third thing the check caught was itself: an exemption that had outlived its reason. `hygiene.py` proves its own
+exemptions are still earning their place before it reports anything.
+
+## Open items
+
+- **Getting the names into CI.** The gate step enforces shapes only, because `hygiene.private.txt` is not in the
+  repository and must not be. The way to close it is to hand that file to the gate step as a CI secret (a
+  Woodpecker Secret, mounted or written to the workspace before `python3 hygiene.py` runs). That is a change to
+  the CI deployment rather than to this code, and it is worth doing before this repository is genuinely public
+  rather than public-and-ignored.
+- **Whether the confirm button should be a whitelist.** `MCBOT_APPROVER_MODE` is `anyone` in the live deployment on
+  purpose - the boys run their own server and the parent only hosts it - which means the configured approver ids
+  are inert and anyone who can post in a permitted channel can approve a manifest change or a restart. Parked
+  2026-11-17; it is a decision about the family, not a defect.
+
 
 ## Where the security decisions are written
 

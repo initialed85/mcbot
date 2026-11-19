@@ -47,11 +47,12 @@ WORKDIR /opt/mcbot
 # its configuration table, its persona and the tests that decide what passes are all outside what the agent can
 # edit. `pi-models.json` is deliberately NOT in this list - it is generated at startup by render_pi_models.py,
 # from configuration, because a checked-in copy of it is one provider's deployment baked into everybody's image.
-COPY bot.py pi_rpc.py rcon.py config_table.py render_pi_models.py /opt/mcbot/
+COPY bot.py pi_rpc.py rcon.py config_table.py render_pi_models.py hygiene.py /opt/mcbot/
 COPY entrypoint.sh test-git-shim.sh test-sandbox-adversarial.sh /opt/mcbot/
 COPY test-rcon.py test-image-smoke.py test-gate.py test-config.py test-bot-policy.py /opt/mcbot/
 COPY hack/ /opt/mcbot/hack/
 COPY docs/ /opt/mcbot/docs/
+COPY MAINTENANCE.md AGENTS.md /opt/mcbot/
 # The example deployment travels in the image for two reasons: `test-config.py` asserts the checker passes
 # against it (a checker that has never been pointed at a real manifest is a checker nobody has used), and
 # whoever is debugging a pod can read the shape the pod was supposed to be started from without leaving it.
