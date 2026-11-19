@@ -1400,9 +1400,11 @@ def main() -> int:
           bot.CHAT_LINE_RE.search("[06:53:07 INFO]: [Not Secure] [Rcon] mcbot: Java: 203.0.2.5:25565"), None)
 
     # --- 20a. the tail has to name the container the pod actually has -------------------------------
-    # `kubectl logs -c` matches a container id, not whatever the manifest calls the container. On the server
-    # this bot was written against, those two words are `server` and `minecraft`, and getting them the other way
-    # round makes every ask fail in silence: no chat lines, `tailing: false` in healthz, Discord still fine.
+    # `kubectl logs -c` matches a container id, and that id is not inferable from the other names in a
+    # deployment: on the server this bot was written against the app directory, ConfigMap, PVC and volume are all
+    # `minecraft` while the pod's one container is `server`, so `-c minecraft` is the natural wrong guess and
+    # kubectl refuses it ("container minecraft is not valid for pod server-0 out of: server"). Getting it wrong
+    # makes every ask fail in silence: no chat lines, `tailing: false` in healthz, Discord still fine.
     with open(os.path.join(HERE, "deploy", "example", "configmap.yaml")) as fh:
         example_cm = fh.read()
     check("the shipped example names the container id, not the manifest's container name",

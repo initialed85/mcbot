@@ -9,8 +9,10 @@ An in-game ask is two independent wires, and each one fails on its own.
 
 1. **Capture** - `kubectl logs -f` on the server pod, filtered by `CHAT_LINE_RE`. Needs `pods/log` in the
    server's namespace, `MCBOT_INGAME_POD` naming a pod that exists, and `MCBOT_INGAME_CONTAINER` naming a
-   **container id**. The manifest's container name is not that: on the server this was written against the
-   manifest says `minecraft` and the pod says `server`, and `kubectl logs -c minecraft` is refused outright.
+   **container id** - which is not inferable from the other names in a deployment. On the server this was written
+   against, the app directory, ConfigMap, PVC and volume are all `minecraft` while the pod's single container is
+   `server`, so `kubectl logs -c minecraft` is the natural wrong guess and is refused outright (`container
+   minecraft is not valid for pod server-0 out of: server`). Ask the pod what containers it has.
    The failure is quiet - `ingame.tailing: false` in `/healthz`, every ask silently unanswered, and the Discord
    half still looking perfectly healthy. Check `tailing` before anything else.
 2. **Answer** - RCON `say`. Needs `MCBOT_RCON_HOST` / `MCBOT_RCON_PORT` / `MCBOT_RCON_PASSWORD` to reach the
